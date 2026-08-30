@@ -67,3 +67,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# 视频广播项目补充
+*.mp4
+*.avi
+*.h264
+*.264
