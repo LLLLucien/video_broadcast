@@ -2,7 +2,7 @@
 
 > **本文档用途**：供虚拟机开发环境中的 AI 助手快速了解项目全貌，高效协助开发。
 > **信息优先级**：以本文档与《单向视频广播系统需求规格说明书-草案V0.4(1).docx》为准（V0.4(1) 为最新需求基线，在 V0.4 基础上补充了接口契约、错误码、性能量化与联调清单）。更早的 V0.1~V0.4 文档仅作演进参考，**不要**以其为准。
-> **最后更新**：2026-08-31（已按本地虚拟机实测环境校准，代码边界等条款已按 lmq 实际职责确认）
+> **最后更新**：2026-09-02（新增：M0~M3 实测完成状态、摄像头透传完成、本次 VLC 联调验证记录，见 §5 与 §7；旧文档中"开发尚未开始/M0 待做/main.cpp 占位"等描述均已过期）
 
 ---
 
@@ -55,13 +55,13 @@ RTP 封装 + UDP 发送（libavformat + 原生 socket；阶段一单播，阶段
 
 - ✅ 需求文档：SRS V0.4(1) 完成（含接口契约、错误码表、联调清单）
 - ✅ 仓库：GitHub `LLLLucien/video_broadcast`（Public）+ Gitee 镜像 `Lucien_Memory/video_broadcast`，均走 SSH
-- ✅ 仓库骨架初始化**已完成**（2026-08-31 本地实测确认）：
-  - 目录结构 broadcaster/viewer/common 齐全，各含 CMakeLists.txt；common 有 params.h 占位
-  - broadcaster/viewer 的 src/main.cpp 均为占位程序（可编译，运行只打印一行日志）
-  - .gitignore 已含视频忽略（*.mp4/*.avi/*.h264/*.264）
-  - 根 CMakeLists 配置 Qt 6.11.1；build/ 已成功 configure 过一次（CMake/Qt 找包链路已验证）
+- ✅ 仓库骨架初始化**已完成**：目录结构 broadcaster/viewer/common 齐全；.gitignore 已含视频忽略（*.mp4/*.avi/*.h264/*.264）；根 CMakeLists 配置 Qt 6.11.1；build/ 可 configure
 - ✅ 分支已建：`main`（稳定主线）、`lmq-dev`（本人）、`yht-dev`（队友）；本地当前在 `lmq-dev`
-- ⬜ 开发尚未开始编码：M0 环境搭建待做（摄像头透传未完成，无 `/dev/video*`）
+- ✅ **发送端开发 M1~M3 已完成并实测通过（2026-09-02，详见 §7）**：
+  - M1 采集循环：OpenCV 采集，支持 摄像头(/dev/video0) / 测试图(test) / 视频文件 三种源
+  - M2 编码到 mp4：libx264 软编写文件，ffplay/ffprobe 验证时长与帧率正确
+  - M3 发送到网络：FFmpeg rtp muxer 推 UDP/RTP 并生成 broadcast.sdp；ffplay 与 VLC（snap 版）均验证可播
+- ⬜ M4 自研接收端：队友（yht）职责
 
 **开发路线（三阶段，已确认）**：
 1. **阶段一**：发送端引擎（OpenCV 采集 + FFmpeg 编码 + UDP 发送）+ **VLC 当接收端**验证流能播 —— 跑通即证明发送端正确
@@ -91,7 +91,7 @@ RTP 封装 + UDP 发送（libavformat + 原生 socket；阶段一单播，阶段
 **已实测确认（2026-08-31，本地虚拟机）：**
 - 操作系统：Ubuntu 24.04.4 LTS（x86_64）
 - 已装依赖：OpenCV **4.6.0**、FFmpeg **6.1.1**（libavcodec 60.31.102）、libavformat/libavutil/libswscale 同源、Qt **6.11.1**（手动装于 `~/Qt/6.11.1/gcc_64`，根 CMakeLists.txt 已配置）
-- 摄像头透传**未完成**：`/dev/video*` 尚不存在 → M0 待办
+- 摄像头透传**已完成**（2026-09-02 实测）：`/dev/video0` 可用，OpenCV 以 GStreamer 后端打开成功；`-s test` 测试图模式保留作为无摄像头兜底
 - build/ 已成功 configure 一次，CMake/Qt 找包链路正常，可增量编译
 - 硬件：带摄像头的 PC；发送端建议 4 核以上（软编码吃 CPU）
 - 网络：局域网；组播跨网段需 IGMP Snooping（实验室同网段一般无问题）
@@ -219,12 +219,12 @@ build/（本地存在，已 gitignore）    ← 已 configure 过，勿提交
 |---|---|---|
 | SRS 需求文档 | ✅ 完成 | V0.4(1) 为最新基线 |
 | GitHub 仓库创建 | ✅ 完成 | LLLLucien/video_broadcast，Public |
-| 仓库骨架初始化（虚拟机） | ✅ 完成 | 目录骨架、.gitignore（含视频忽略）、common/params.h、两端占位 main.cpp 均已提交；build/ 可 configure |
-| M0 环境搭建 | ⬜ 待做 | 装依赖（见 2.2）、摄像头透传验证（ffplay /dev/video0） |
-| M1 采集循环 | ⬜ 待做 | OpenCV 采集 + 帧率统计，全部是已学内容 |
-| M2 编码到文件 | ⬜ 待做 | FFmpeg 六函数：find_encoder → alloc_context3 → sws_scale → send_frame/receive_packet → 写 mp4；用 VLC 能播即过 |
-| M3 发送到网络 | ⬜ 待做 | 输出目的地从文件换成 RTP/UDP，VLC 拉流验证 |
-| M4 自研接收端 | ⬜ 待做 | recvfrom → 解码 → imshow（队友职责） |
+| 仓库骨架初始化（虚拟机） | ✅ 完成 | 目录骨架、.gitignore（含视频忽略）、common/params.h 均已提交；build/ 可 configure |
+| M0 环境搭建 | ✅ 完成 | 依赖装齐（OpenCV 4.6.0/FFmpeg 6.1.1/Qt 6.11.1）；摄像头透传完成（/dev/video0 可用） |
+| M1 采集循环 | ✅ 完成 | OpenCV 采集 + 测试图/视频文件多源支持，在 VideoEngine::init_capture/read_frame |
+| M2 编码到文件 | ✅ 完成 | libx264 软编 + 写 mp4，ffplay/ffprobe 验证通过（时长/帧率正确） |
+| M3 发送到网络 | ✅ 完成 | rtp muxer 推 UDP 单播并生成 broadcast.sdp；ffplay 与 VLC（snap 版）验证可播（2026-09-02） |
+| M4 自研接收端 | ⬜ 待做 | recvfrom → 解码 → imshow（队友职责）；发送端已就绪可联调 |
 
 ### 5.2 待解决问题与优先级
 
@@ -240,10 +240,11 @@ build/（本地存在，已 gitignore）    ← 已 configure 过，勿提交
 **已实测确认（2026-08-31）：**
 - 系统：Ubuntu 24.04.4 LTS（x86_64）；用户 `lmq20233547`；VSCode Remote-SSH；shell 为 **fish**（通配符行为与 bash 不同：如 `ls /dev/video*` 无匹配会直接报错，可改用 `ls /dev | grep video`）
 - 依赖：OpenCV 4.6.0、FFmpeg 6.1.1（libavcodec 60.31.102）、Qt 6.11.1（`~/Qt/6.11.1/gcc_64`，根 CMakeLists 已配置）——均可用
-- 摄像头透传**未完成**（无 `/dev/video*`），是 M0 第一步；透传方式：VMware「虚拟机→可移动设备→连接」/ VirtualBox「设备→USB」
+- 摄像头透传**已完成**（/dev/video0 可用，2026-09-02 实测）；透传方式：VMware「虚拟机→可移动设备→连接」/ VirtualBox「设备→USB」
 - build/ 已成功 configure 过一次，CMake + Qt 找包链路正常，可增量编译
 - Git：本地在 `lmq-dev`（跟踪 `origin/lmq-dev`）；远程 `main`/`lmq-dev`/`yht-dev`；GitHub（origin）+ Gitee 双远程，默认推送 GitHub，Gitee 手动 `git push gitee ...` 镜像
-- 代码现状：broadcaster/viewer 的 src/main.cpp 均为占位，可编译
+- 代码现状：broadcaster 已完成 M2/M3（`src/` 下 main.cpp + video_engine.h/.cpp，纯命令行引擎）；viewer 的 src/main.cpp 仍为占位
+- **VLC 版本陷阱**：系统版 `/usr/bin/vlc`（3.0.20-3build6）对 ffmpeg 6.x 生成的 SDP 解析失败（黑屏）；**必须用 snap 版 `/snap/bin/vlc`**（3.0.20-1-g2617de71b6）才能播 broadcast.sdp，详见 §7
 
 - **权限边界**：`sudo` 安装、GitHub 认证、网络类操作由用户手动执行；AI 遇到权限阻塞应**停下列出要用户手动执行的命令**，不要死循环重试，不要擅自改用危险操作
 - Git 优先 **SSH 方式**（用户之前 HTTPS+token 吃过亏）；GitHub 网络不稳时可用 Gitee 镜像保底
@@ -279,3 +280,58 @@ build/（本地存在，已 gitignore）    ← 已 configure 过，勿提交
 - 已掌握：C socket 编程（TCP/UDP）、pthread 多线程与同步原语、OpenCV 基础（打开摄像头/帧处理/VideoWriter）、Linux 系统编程
 - 本项目是他 C++/Qt 方向的简历级实践项目，**面试要能讲清楚每一环**
 - 学习风格：先理解底层再使用抽象、喜欢逐行注释的示例代码、追求通用方案而非临时凑合
+
+---
+
+## 7. 联调验证记录（2026-09-02，lmq 发送端 M2/M3 实测）
+
+### 7.1 本次验证了什么（全部通过）
+
+| 场景 | 命令 | 结果 |
+|---|---|---|
+| M2：测试图编码写 mp4 | `./broadcaster -s test -t 3` → 生成 out.mp4 | ✅ ffprobe/ffplay 可播，时长≈3s、30fps 正确 |
+| M3：测试图推 RTP | `./broadcaster -s test -f rtp://127.0.0.1:5004 -t 60` | ✅ 收端可播 |
+| M3：摄像头推 RTP | `./broadcaster -s 0 -f rtp://127.0.0.1:5004 -t 60` | ✅ /dev/video0 打开成功，持续推流 |
+| 接收：ffplay | `ffplay -protocol_whitelist file,rtp,udp broadcast.sdp` | ✅ 出画面 |
+| 接收：VLC | `/snap/bin/vlc broadcast.sdp` | ✅ 出画面（阶段一验收点达成） |
+
+运行产物：`broadcast.sdp`（发送端在运行目录自动生成，接收端说明书）；调试遗留 `vlc.sdp`（已无用，勿提交）。
+
+### 7.2 遇到的问题与解决（逐条记录，含 VLC 黑屏全程）
+
+1. **C++ 链接 FFmpeg 符号错误**（符号被 C++ mangle 成 `_Z13avcodec_open2...`）
+   - 原因：该环境 FFmpeg 头文件不自带 `extern "C"` 保护
+   - 解决：`#include` 外包一层 `extern "C" { ... }`
+2. **`free(): invalid pointer` 崩溃**
+   - 原因：栈上裸 `AVPacket` 传给 `avcodec_receive_packet()`，其内部先 unref 野指针
+   - 解决：必须 `av_packet_alloc()` 分配（FFmpeg 5.x+ 要求），写包与 flush 两处都改
+3. **mp4 时长错误**（duration≈0.0058s、r_frame_rate=15360）
+   - 原因：pts/dts 未从编码器基准(1/30)换算到 muxer 实际基准（mp4 会改 time_base）
+   - 解决：写包与 flush 处均 `av_rescale_q_rnd` 换算到 `out_stream->time_base`
+4. **ffplay 报 `Protocol 'rtp' not on whitelist 'file,crypto,data'`**
+   - 原因：Ubuntu ffmpeg 默认协议白名单不含 rtp/udp（安全加固）
+   - 解决：加参数 `-protocol_whitelist file,rtp,udp`（VLC 无此限制）
+5. **VLC 打开 broadcast.sdp 黑屏（排查全过程）**
+   - 现象①：系统版 VLC 3.0.20-3build6 填 `rtp://` 地址播 → 必然黑屏（裸 RTP H.264 无 SDP 参数/SPS-PPS，解不了）→ 正确做法是**打开 sdp 文件**
+   - 现象②：打开 sdp 仍黑屏，`cvlc --verbose 2` 日志见 `sap demux: unexpected SDP line: 0x62 / invalid SDP`，随后兜底选错 `ps demuxer` → garbage
+     - 原因：VLC 3.0.x 的 SDP 解析器(sap demux)脆弱，遇 `b=AS:2000` 行直接判无效（0x62='b'）；fmtp 行内分号后空格也不耐受
+     - 尝试序列（均无效）：删 `b=AS:` 行 → 仍黑屏；强制 `--demux=rtp` → 报"无法打开 MRL"；手工重排 sdp（去 fmtp 空格曾误删 `a=fmtp:96 ` 必需空格，修正后补 `a=rtcp:5005`、删 `a=tool:`）→ 仍黑屏
+   - 深层原因：发送端设 `AV_CODEC_FLAG_GLOBAL_HEADER` → SPS/PPS 只在 SDP 的 sprop-parameter-sets 里、流内不带；VLC 一旦 SDP 解析环节失败就拿不到 SPS/PPS，永远解不出画面
+   - 升级尝试：`sudo snap install vlc` 装出仍是 **3.0.20-1-g2617de71b6**（VideoLAN 尚无 4.x 稳定版，snap 稳定频道只有 3.0.x）
+   - 最终解法：**改用 snap 版 VLC** `/snap/bin/vlc`（3.0.20-1-g2617de71b6），直接打开原始 broadcast.sdp 即出画面（无需任何手工改 sdp）
+   - 结论：**VLC 版本差异是主要变量**（系统版 3.0.20-3build6 的 SDP 解析有 bug）；本机验证一律用 `/snap/bin/vlc`
+6. **VLC 出画面后日志有 `main decoder error: buffer deadlock prevented`**
+   - 非致命（启动缓冲/解码器短暂忙的自救提示），画面流畅可忽略；若卡顿加 `--network-caching=300 --rtp-caching=200`
+7. **UDP 是"无连接"协议**（发送端丢包、接收端 bind 收）
+   - 同机验证：收发都用 `127.0.0.1` 即可，不必改虚拟网卡 IP
+   - 接收端程序建议 bind `0.0.0.0:端口`（不挑发送端 IP，跨机联调也不用改代码）
+
+### 7.3 发送端当前技术参数（接收端/联调需对齐，来源 broadcaster/src/video_engine.cpp）
+
+- 分辨率 **640×480**、帧率 **30fps**、像素 YUV420P
+- 编码 **H.264（libx264 软编，preset=ultrafast）**、码率 **2Mbps**、**GOP=60 帧（约 2 秒 1 个 I 帧）**、**无 B 帧**
+- RTP 契约：**payload type 96、90000Hz**、单播端口 **5004**（阶段一/二；阶段三组播 239.255.0.1）
+- ⚠️ **SPS/PPS 关键点**：编码器设了 `AV_CODEC_FLAG_GLOBAL_HEADER` → **RTP 流内不带 SPS/PPS**，只在 SDP 的 `sprop-parameter-sets` 里
+  - 接收端若用 FFmpeg 的 sdp demuxer 打开 broadcast.sdp → 自动配置解码器，无感
+  - 接收端若自研裸收 RTP → 必须自行解析 SDP 的 sprop-parameter-sets 喂给解码器（或等带内 I 帧配置），否则永远无法开始解码（黑屏）
+- RTP 分包（FU-A 等）由 FFmpeg rtp muxer 自动完成，发送端不手写 socket
