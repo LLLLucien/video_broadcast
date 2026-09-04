@@ -71,10 +71,6 @@ bool H264Decoder::decodeNAL(const QByteArray &nal)
         return false;
     }
 
-    // nal is already an access unit whose NALs are separated by start codes
-    // (0x00000001). Feed it to the decoder as a single packet to avoid the
-    // redundant secondary parser pass. A one-time packet allocation per frame
-    // replaces the former per-fragment allocations inside the parse loop.
     AVPacket *packet = av_packet_alloc();
     if (!packet)
     {
@@ -160,3 +156,4 @@ bool H264Decoder::ensureRgbFrame(int width, int height)
     rgbFrame_->format = AV_PIX_FMT_RGB24;
     return true;
 }
+
