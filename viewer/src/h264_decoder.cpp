@@ -76,8 +76,7 @@ bool H264Decoder::decodeNAL(const QByteArray &nal)
     {
         return false;
     }
-    // nal stays alive during avcodec_send_packet(); the decoder only references
-    // the buffer during this call, so const_cast away of the read-only data is safe.
+
     packet->data = const_cast<uint8_t *>(
         reinterpret_cast<const uint8_t *>(nal.constData()));
     packet->size = nal.size();
@@ -102,7 +101,8 @@ bool H264Decoder::decodeNAL(const QByteArray &nal)
                       rgbFrame_->data, rgbFrame_->linesize);
             latestImage_ = QImage(reinterpret_cast<uchar *>(rgbFrame_->data[0]),
                                   frame_->width, frame_->height,
-                                  rgbFrame_->linesize[0], QImage::Format_RGB888).copy();
+                                  rgbFrame_->linesize[0], QImage::Format_RGB888)
+                               .copy();
             decoded = true;
             av_frame_unref(frame_);
         }
@@ -156,4 +156,3 @@ bool H264Decoder::ensureRgbFrame(int width, int height)
     rgbFrame_->format = AV_PIX_FMT_RGB24;
     return true;
 }
-
