@@ -1,11 +1,11 @@
 #pragma once
 
-#include <QByteArray>
 #include <QImage>
 
 #include <memory>
 
 struct AVCodecContext;
+struct AVCodecParameters;
 struct AVFrame;
 struct AVPacket;
 struct SwsContext;
@@ -26,11 +26,6 @@ struct AvFrameDeleter
     void operator()(AVFrame *p) const noexcept;
 };
 
-struct AVPacketDeleter
-{
-    void operator()(AVPacket *p) const noexcept;
-};
-
 struct SwsContextDeleter
 {
     void operator()(SwsContext *p) const noexcept;
@@ -38,7 +33,6 @@ struct SwsContextDeleter
 
 using CodecContextPtr = std::unique_ptr<AVCodecContext, AvCodecContextDeleter>;
 using FramePtr        = std::unique_ptr<AVFrame, AvFrameDeleter>;
-using AVPacketPtr     = std::unique_ptr<AVPacket, AVPacketDeleter>;
 using SwsContextPtr   = std::unique_ptr<SwsContext, SwsContextDeleter>;
 
 class H264Decoder
@@ -47,8 +41,16 @@ public:
     H264Decoder() = default;
     ~H264Decoder();
 
-    bool init();
-    bool decodeNAL(const QByteArray &nal);
+    /**
+     * @brief 用流参数初始化解码器。
+     * 参数来自 rtp demuxer 打开 SDP 后的 codecpar：其中 extradata 由 SDP 的
+     * sprop-parameter-sets 填充（含 SPS/PPS），解码器开播即具备完整参数。
+     */
+    bool init(const AVCodecParameters *params);
+
+    /// @brief 解码一帧 H.264 数据（来自 av_read_frame 的 AVPacket）
+    bool decodePacket(AVPacket *packet);
+
     const QImage &latestImage() const;
 
 private:

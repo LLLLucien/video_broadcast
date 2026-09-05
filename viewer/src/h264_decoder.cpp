@@ -1,6 +1,7 @@
 #include "h264_decoder.h"
 
 #include <iostream>
+
 extern "C"
 {
 #include <libavcodec/avcodec.h>
@@ -25,12 +26,6 @@ void AvFrameDeleter::operator()(AVFrame *p) const noexcept
     av_frame_free(&p);
 }
 
-// av_packet_free 内部先 av_packet_unref，释放引用缓冲，再释放 AVPacket 本体。
-void AVPacketDeleter::operator()(AVPacket *p) const noexcept
-{
-    av_packet_free(&p);
-}
-
 void SwsContextDeleter::operator()(SwsContext *p) const noexcept
 {
     sws_freeContext(p);
@@ -38,29 +33,45 @@ void SwsContextDeleter::operator()(SwsContext *p) const noexcept
 
 H264Decoder::~H264Decoder() = default; // unique_ptr 成员析构时自动调用各删除器释放 FFmpeg 资源
 
-bool H264Decoder::init()
+bool H264Decoder::init(const AVCodecParameters *params)
 {
-    // 查找 H264 解码器
-    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!params)
+    {
+        std::cerr << "H264Decoder: 未提供流参数" << std::endl;
+        return false;
+    }
+
+    // 1. 按流参数找解码器（rtp demuxer 解析 SDP 后 codec_id 为 H264）
+    const AVCodec *codec = avcodec_find_decoder(params->codec_id);
     if (!codec)
     {
         std::cerr << "H264 decoder not found" << std::endl;
         return false;
     }
 
-    // RAII：交给智能指针托管。即便后面 avcodec_open2 失败提前 return（例如
-    // open2 返回负值），codecContext_ 也会在离开作用域时被删除器自动释放，
-    // 消除了原来 "open 失败却不 free context" 的泄漏路径。
-
-    //创建解码器上下文，失败直接返回，资源自动释放
+    // 2. RAII：交给智能指针托管。即便后面 avcodec_open2 失败提前 return
+    //    （例如返回负值），codecContext_ 也会在离开作用域时被删除器自动释放。
     codecContext_ = CodecContextPtr(avcodec_alloc_context3(codec));
-    if (!codecContext_ ||
-        avcodec_open2(codecContext_.get(), codec, nullptr) < 0)
+    if (!codecContext_)
+    {
+        std::cerr << "Failed to allocate H264 decoder context" << std::endl;
+        return false;
+    }
+
+    // 3. 复制流参数（含 SDP sprop-parameter-sets 带来的 SPS/PPS extradata）
+    if (avcodec_parameters_to_context(codecContext_.get(), params) < 0)
+    {
+        std::cerr << "Failed to copy codec parameters" << std::endl;
+        return false;
+    }
+
+    // 4. 打开解码器
+    if (avcodec_open2(codecContext_.get(), codec, nullptr) < 0)
     {
         std::cerr << "Failed to initialize H264 decoder" << std::endl;
         return false;
     }
-    // 设置解码器参数，线程数为 0 表示自动选择，线程类型为切片模式，低延迟模式，快速模式
+    // 线程数为 0 表示自动选择，线程类型为切片模式，低延迟模式，快速模式
     codecContext_->thread_count = 0;
     codecContext_->thread_type = FF_THREAD_SLICE;
     codecContext_->flags |= AV_CODEC_FLAG_LOW_DELAY;
@@ -78,26 +89,15 @@ bool H264Decoder::init()
     return true;
 }
 
-bool H264Decoder::decodeNAL(const QByteArray &nal)
+bool H264Decoder::decodePacket(AVPacket *packet)
 {
-    if (!codecContext_ || nal.isEmpty())
+    if (!codecContext_ || !packet || packet->size <= 0)
     {
         return false;
     }
 
-    // 临时 AVPacket 用 RAII 托管：scope 内任何提前 return / 断言都不泄漏，
-    // 函数末尾的 av_packet_free 由删除器自动完成（曾遗漏该释放会累积泄漏）。
-    AVPacketPtr packet(av_packet_alloc());
-    if (!packet)
-    {
-        return false;
-    }
-
-    packet->data = const_cast<uint8_t *>(
-        reinterpret_cast<const uint8_t *>(nal.constData()));
-    packet->size = nal.size();
     bool decoded = false;
-    if (avcodec_send_packet(codecContext_.get(), packet.get()) >= 0)
+    if (avcodec_send_packet(codecContext_.get(), packet) >= 0)
     {
         while (true)
         {
@@ -124,7 +124,7 @@ bool H264Decoder::decodeNAL(const QByteArray &nal)
             av_frame_unref(frame_.get());
         }
     }
-    return decoded; // packet 离开作用域后由删除器自动 av_packet_free
+    return decoded;
 }
 
 const QImage &H264Decoder::latestImage() const
@@ -175,4 +175,3 @@ bool H264Decoder::ensureRgbFrame(int width, int height)
     rgbFrame_->format = AV_PIX_FMT_RGB24;
     return av_frame_get_buffer(rgbFrame_.get(), 1) >= 0;
 }
-

@@ -7,11 +7,10 @@
 #include <QLabel>
 #include <QPixmap>
 #include <QStatusBar>
-#include <QThread>
 #include <QTimer>
 #include <QWidget>
 
-ViewerWindow::ViewerWindow(QWidget *parent)
+ViewerWindow::ViewerWindow(const QString &sdpPath, QWidget *parent)
     : QMainWindow(parent)
 {
     auto *central = new QWidget(this);
@@ -26,12 +25,10 @@ ViewerWindow::ViewerWindow(QWidget *parent)
     resize(vb::kWidth + 40, vb::kHeight + 60);
     setWindowTitle("Viewer");
 
-    receiverThread_ = new QThread(this);
-    receiver_ = new VideoReceiver;
-    receiver_->moveToThread(receiverThread_);
-    connect(receiverThread_, &QThread::started, receiver_, &VideoReceiver::start);
+    // 收流线程在 VideoReceiver 内部管理，信号跨线程队列投递到本窗口
+    receiver_ = new VideoReceiver(this);
     connect(receiver_, &VideoReceiver::statusChanged, this, &ViewerWindow::updateStatus);
-    receiverThread_->start();
+    receiver_->start(sdpPath);
 
     displayTimer_ = new QTimer(this);
     displayTimer_->setInterval(33);
@@ -41,9 +38,16 @@ ViewerWindow::ViewerWindow(QWidget *parent)
 
 ViewerWindow::~ViewerWindow()
 {
-    receiverThread_->quit();
-    receiverThread_->wait();
-    delete receiver_;
+    // 先请求收流线程退出并等待，避免线程在对象析构后仍在访问成员
+    if (receiver_)
+    {
+        receiver_->stop();
+    }
+}
+
+int ViewerWindow::decodedFrameCount() const
+{
+    return receiver_ ? receiver_->decodedFrameCount() : 0;
 }
 
 void ViewerWindow::updateImage()
@@ -70,4 +74,9 @@ void ViewerWindow::updateImage()
 void ViewerWindow::updateStatus(const QString &message)
 {
     statusBar()->showMessage(message);
+    if (message.startsWith("等待信号"))
+    {
+        label_->clear();
+        label_->setText("等待信号...");
+    }
 }
