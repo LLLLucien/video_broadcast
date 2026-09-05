@@ -1,8 +1,6 @@
 #include "h264_decoder.h"
 
 #include <iostream>
-#include <cstring>
-
 extern "C"
 {
 #include <libavcodec/avcodec.h>
@@ -11,29 +9,38 @@ extern "C"
 #include <libswscale/swscale.h>
 }
 
-H264Decoder::~H264Decoder()
+// ---------------------------------------------------------------------------
+// RAII 删除器实现：FFmpeg 的 C 资源绝不能直接 delete，必须走各自的配对释放函数。
+// operator() 均 const noexcept：unique_ptr 的析构/ reset 都以 noexcept 约束，
+// 释放资源本身也不应抛异常或上抛。
+// ---------------------------------------------------------------------------
+void AvCodecContextDeleter::operator()(AVCodecContext *p) const noexcept
 {
-    if (frame_)
-    {
-        av_frame_free(&frame_);
-    }
-    if (rgbFrame_)
-    {
-        av_freep(&rgbFrame_->data[0]);
-        av_frame_free(&rgbFrame_);
-    }
-    if (codecContext_)
-    {
-        avcodec_free_context(&codecContext_);
-    }
-    if (swsContext_)
-    {
-        sws_freeContext(swsContext_);
-    }
+    avcodec_free_context(&p);
 }
+
+// av_frame_free 内部会先 av_frame_unref(p)，把该帧引用计数所指向的 buffer 都释放掉。
+void AvFrameDeleter::operator()(AVFrame *p) const noexcept
+{
+    av_frame_free(&p);
+}
+
+// av_packet_free 内部先 av_packet_unref，释放引用缓冲，再释放 AVPacket 本体。
+void AVPacketDeleter::operator()(AVPacket *p) const noexcept
+{
+    av_packet_free(&p);
+}
+
+void SwsContextDeleter::operator()(SwsContext *p) const noexcept
+{
+    sws_freeContext(p);
+}
+
+H264Decoder::~H264Decoder() = default; // unique_ptr 成员析构时自动调用各删除器释放 FFmpeg 资源
 
 bool H264Decoder::init()
 {
+    // 查找 H264 解码器
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
     if (!codec)
     {
@@ -41,19 +48,26 @@ bool H264Decoder::init()
         return false;
     }
 
-    codecContext_ = avcodec_alloc_context3(codec);
-    if (!codecContext_ || avcodec_open2(codecContext_, codec, nullptr) < 0)
+    // RAII：交给智能指针托管。即便后面 avcodec_open2 失败提前 return（例如
+    // open2 返回负值），codecContext_ 也会在离开作用域时被删除器自动释放，
+    // 消除了原来 "open 失败却不 free context" 的泄漏路径。
+
+    //创建解码器上下文，失败直接返回，资源自动释放
+    codecContext_ = CodecContextPtr(avcodec_alloc_context3(codec));
+    if (!codecContext_ ||
+        avcodec_open2(codecContext_.get(), codec, nullptr) < 0)
     {
         std::cerr << "Failed to initialize H264 decoder" << std::endl;
         return false;
     }
+    // 设置解码器参数，线程数为 0 表示自动选择，线程类型为切片模式，低延迟模式，快速模式
     codecContext_->thread_count = 0;
     codecContext_->thread_type = FF_THREAD_SLICE;
     codecContext_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     codecContext_->flags2 |= AV_CODEC_FLAG2_FAST;
 
-    frame_ = av_frame_alloc();
-    rgbFrame_ = av_frame_alloc();
+    frame_    = FramePtr(av_frame_alloc());
+    rgbFrame_ = FramePtr(av_frame_alloc());
     if (!frame_ || !rgbFrame_)
     {
         std::cerr << "Failed to allocate H264 decoder resources" << std::endl;
@@ -71,7 +85,9 @@ bool H264Decoder::decodeNAL(const QByteArray &nal)
         return false;
     }
 
-    AVPacket *packet = av_packet_alloc();
+    // 临时 AVPacket 用 RAII 托管：scope 内任何提前 return / 断言都不泄漏，
+    // 函数末尾的 av_packet_free 由删除器自动完成（曾遗漏该释放会累积泄漏）。
+    AVPacketPtr packet(av_packet_alloc());
     if (!packet)
     {
         return false;
@@ -81,11 +97,11 @@ bool H264Decoder::decodeNAL(const QByteArray &nal)
         reinterpret_cast<const uint8_t *>(nal.constData()));
     packet->size = nal.size();
     bool decoded = false;
-    if (avcodec_send_packet(codecContext_, packet) >= 0)
+    if (avcodec_send_packet(codecContext_.get(), packet.get()) >= 0)
     {
         while (true)
         {
-            const int ret = avcodec_receive_frame(codecContext_, frame_);
+            const int ret = avcodec_receive_frame(codecContext_.get(), frame_.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF || ret < 0)
             {
                 break;
@@ -93,22 +109,22 @@ bool H264Decoder::decodeNAL(const QByteArray &nal)
 
             if (!ensureRgbFrame(frame_->width, frame_->height))
             {
-                av_frame_unref(frame_);
+                av_frame_unref(frame_.get());
                 break;
             }
 
-            sws_scale(swsContext_, frame_->data, frame_->linesize, 0, frame_->height,
+            sws_scale(swsContext_.get(), frame_->data, frame_->linesize,
+                      0, frame_->height,
                       rgbFrame_->data, rgbFrame_->linesize);
             latestImage_ = QImage(reinterpret_cast<uchar *>(rgbFrame_->data[0]),
                                   frame_->width, frame_->height,
                                   rgbFrame_->linesize[0], QImage::Format_RGB888)
                                .copy();
             decoded = true;
-            av_frame_unref(frame_);
+            av_frame_unref(frame_.get());
         }
     }
-    av_packet_free(&packet);
-    return decoded;
+    return decoded; // packet 离开作用域后由删除器自动 av_packet_free
 }
 
 const QImage &H264Decoder::latestImage() const
@@ -124,12 +140,14 @@ bool H264Decoder::ensureRgbFrame(int width, int height)
     }
 
     const int pixelFormat = codecContext_->pix_fmt;
-    if (!swsContext_ || currentWidth_ != width || currentHeight_ != height || currentPixFmt_ != pixelFormat)
+    if (!swsContext_ ||
+        currentWidth_ != width || currentHeight_ != height || currentPixFmt_ != pixelFormat)
     {
-        sws_freeContext(swsContext_);
-        swsContext_ = sws_getContext(width, height, codecContext_->pix_fmt,
-                                     width, height, AV_PIX_FMT_RGB24,
-                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
+        // RAII：直接用 reset 替换 swsContext_，旧上下文由删除器自动 sws_freeContext。
+        swsContext_ = SwsContextPtr(
+            sws_getContext(width, height, codecContext_->pix_fmt,
+                           width, height, AV_PIX_FMT_RGB24,
+                           SWS_BILINEAR, nullptr, nullptr, nullptr));
         if (!swsContext_)
         {
             return false;
@@ -139,20 +157,22 @@ bool H264Decoder::ensureRgbFrame(int width, int height)
         currentPixFmt_ = pixelFormat;
     }
 
-    if (rgbFrame_->data[0] && rgbFrame_->width == width &&
-        rgbFrame_->height == height && rgbFrame_->format == AV_PIX_FMT_RGB24)
+    // 缓冲仍可用且尺寸/格式匹配时直接复用，避免每帧重建分配。
+    if (rgbFrame_->data[0] && rgbFrame_->buf[0] &&
+        rgbFrame_->width == width &&
+        rgbFrame_->height == height &&
+        rgbFrame_->format == AV_PIX_FMT_RGB24)
     {
         return true;
     }
 
-    av_freep(&rgbFrame_->data[0]);
-    if (av_image_alloc(rgbFrame_->data, rgbFrame_->linesize, width, height,
-                       AV_PIX_FMT_RGB24, 1) < 0)
-    {
-        return false;
-    }
+    // 交由 AVFrame 自己持有 RGB 输出缓冲（av_frame_get_buffer 内部会做必要的
+    // 对齐分配，并放入 rgbFrame_->buf 引用）。之后释放只需 av_frame_free 即可，
+    // 不再需要额外的 av_freep(&data[0])，也消除了"手动块 + 帧体"两条生命周期。
+    av_frame_unref(rgbFrame_.get());
     rgbFrame_->width = width;
     rgbFrame_->height = height;
     rgbFrame_->format = AV_PIX_FMT_RGB24;
-    return true;
+    return av_frame_get_buffer(rgbFrame_.get(), 1) >= 0;
 }
+
