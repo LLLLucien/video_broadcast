@@ -9,12 +9,14 @@
 #define __VIDEO_ENGINE_H__
 
 #include <opencv2/opencv.hpp>
+#include <atomic>
 #include <string>
 
 // FFmpeg 对象前向声明（实现细节放 .cpp，头文件保持轻量）
 struct AVFormatContext;
 struct AVCodecContext;
 struct AVFrame;
+struct AVPacket;
 struct SwsContext;
 
 /**
@@ -46,6 +48,12 @@ public:
     ~VideoEngine();
 
     /**
+     * @brief 请求安全停止（线程安全，可随时从其他线程调用）。
+     *        run() 会在下一个循环迭代处退出并完成收尾（flush 编码器等）。
+     */
+    void request_stop();
+
+    /**
      * @brief 初始化：打开采集源、编码器、转换器、输出文件
      * @retval true  成功
      * @retval false 失败（错误原因打印到 stderr）
@@ -71,6 +79,9 @@ private:
     std::string output_;                 // 输出：mp4 路径 或 rtp://IP:端口
     int duration_sec_;                   // 运行秒数（<=0 无限）
 
+    // ---- 控制 ----
+    std::atomic<bool> stop_requested_;   // 停止请求标志（跨线程读）
+
     // ---- 采集 ----
     bool use_test_pattern_;              // 是否为测试图模式
     cv::VideoCapture cap_;               // OpenCV 采集器
@@ -85,6 +96,7 @@ private:
 
     // ---- 封装 ----
     bool is_network_output_;             // 是否为 RTP 网络推流（否则写文件）
+    bool sdp_written_;                   // SDP 是否已生成（首个关键帧后生成一次）
     AVFormatContext* fmt_ctx_;           // 封装上下文（mp4 muxer / rtp muxer）
     int stream_index_;                   // 输出流索引
 };

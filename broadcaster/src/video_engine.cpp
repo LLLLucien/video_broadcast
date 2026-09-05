@@ -6,6 +6,7 @@
 // RTP 分包、UDP 收发均由 FFmpeg 的 rtp muxer 封装完成，无需手写底层
 // 参考笔记：https://www.cnblogs.com/linuxAndMcu/category/1613476.html
 // ============================================================
+#include "params.h" // 两端共享参数（分辨率/帧率/码率/组播地址等，见 common/params.h）
 #include "video_engine.h"
 
 #include <chrono>
@@ -24,12 +25,8 @@ extern "C"
 #include <libswscale/swscale.h>
 }
 
-// ---- 编码参数（与 common/params.h 契约一致：640x480 / 30fps / H.264）----
-const int kFrameWidth = 640;  // 输出宽度
-const int kFrameHeight = 480; // 输出高度
-const int kFrameRate = 30;    // 输出帧率
-const int kBitRate = 2000000; // 目标码率 2Mbps（契约 1~4Mbps 区间）
-const int kGopSize = 60;      // 短 GOP：每 60 帧一个 I 帧（约 2 秒）
+// 编码参数统一取自 common/params.h（vb::kWidth / kHeight / kFrameRate /
+// kBitRate / kGopSize），两端不再各自维护一份，改参只需动一处。
 
 // ------------------------------------------------------------------
 // 构造函数：只保存参数，不打开任何资源
@@ -37,7 +34,7 @@ const int kGopSize = 60;      // 短 GOP：每 60 帧一个 I 帧（约 2 秒）
 VideoEngine::VideoEngine(const std::string &source, const std::string &output, int durationSec)
     : source_(source), output_(output), duration_sec_(durationSec), use_test_pattern_(false), frame_index_(0),
       sws_ctx_(nullptr), frame_yuv_(nullptr), enc_ctx_(nullptr), is_network_output_(false), fmt_ctx_(nullptr),
-      stream_index_(-1)
+      stream_index_(-1), sdp_written_(false), stop_requested_(false)
 {
 }
 
@@ -47,6 +44,14 @@ VideoEngine::VideoEngine(const std::string &source, const std::string &output, i
 VideoEngine::~VideoEngine()
 {
     cleanup();
+}
+
+// ------------------------------------------------------------------
+// 请求停止（线程安全）：仅置标志，run() 循环在安全点退出并收尾
+// ------------------------------------------------------------------
+void VideoEngine::request_stop()
+{
+    stop_requested_ = true;
 }
 
 // ------------------------------------------------------------------
@@ -70,7 +75,7 @@ bool VideoEngine::init()
     {
         return false;
     }
-    printf("[engine] 初始化完成: %dx%d@%dfps, 输出=%s\n", kFrameWidth, kFrameHeight, kFrameRate, output_.c_str());
+    printf("[engine] 初始化完成: %dx%d@%dfps, 输出=%s\n", vb::kWidth, vb::kHeight, vb::kFrameRate, output_.c_str());
     return true;
 }
 
@@ -96,8 +101,8 @@ bool VideoEngine::init_capture()
             return false;
         }
         // 尽量设置 640x480；部分摄像头不支持时会自动回退到原生分辨率
-        cap_.set(cv::CAP_PROP_FRAME_WIDTH, kFrameWidth);
-        cap_.set(cv::CAP_PROP_FRAME_HEIGHT, kFrameHeight);
+        cap_.set(cv::CAP_PROP_FRAME_WIDTH, vb::kWidth);
+        cap_.set(cv::CAP_PROP_FRAME_HEIGHT, vb::kHeight);
     }
     else
     {
@@ -134,15 +139,17 @@ bool VideoEngine::init_encoder()
     }
 
     // 3. 配置编码参数
-    enc_ctx_->width = kFrameWidth;          // 宽
-    enc_ctx_->height = kFrameHeight;        // 高
+    enc_ctx_->width = vb::kWidth;          // 宽
+    enc_ctx_->height = vb::kHeight;        // 高
     enc_ctx_->pix_fmt = AV_PIX_FMT_YUV420P; // 输入像素格式（sws 转换后的）
-    enc_ctx_->time_base = {1, kFrameRate};  // 时间基准 1/30 秒
-    enc_ctx_->framerate = {kFrameRate, 1};  // 帧率 30fps
-    enc_ctx_->bit_rate = kBitRate;          // 目标码率 2Mbps
-    enc_ctx_->gop_size = kGopSize;          // 短 GOP：每 60 帧一个 I 帧
+    enc_ctx_->time_base = {1, vb::kFrameRate};  // 时间基准 1/30 秒
+    enc_ctx_->framerate = {vb::kFrameRate, 1};  // 帧率 30fps
+    enc_ctx_->bit_rate = vb::kBitRate;          // 目标码率 2Mbps
+    enc_ctx_->gop_size = vb::kGopSize;          // 短 GOP：每 60 帧一个 I 帧
     enc_ctx_->max_b_frames = 0;             // 不用 B 帧：降低延迟和复杂度
-    // mp4 要求 SPS/PPS 写进文件头（extradata），而不是随帧发送
+    // GLOBAL_HEADER：SPS/PPS 写进 extradata —— 写 mp4 时进文件头(moov)；
+    // RTP 场景 FFmpeg 靠它生成 SDP 的 sprop-parameter-sets，接收端
+    // （viewer / VLC / ffplay）用 rtp demuxer 读 SDP 即可拿到参数集解码。
     enc_ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     // 4. 编码速度预设：ultrafast 软编 CPU 开销最小、延迟最低
@@ -154,7 +161,7 @@ bool VideoEngine::init_encoder()
         fprintf(stderr, "[engine] avcodec_open2 失败\n");
         return false;
     }
-    printf("[engine] 编码器: libx264, %dMbps, GOP=%d 帧\n", kBitRate / 1000000, kGopSize);
+    printf("[engine] 编码器: libx264, %dMbps, GOP=%d 帧\n", vb::kBitRate / 1000000, vb::kGopSize);
     return true;
 }
 
@@ -164,7 +171,7 @@ bool VideoEngine::init_encoder()
 bool VideoEngine::init_sws()
 {
     // 输入输出尺寸都是 640x480（read_frame 里已统一 resize）
-    sws_ctx_ = sws_getContext(kFrameWidth, kFrameHeight, AV_PIX_FMT_BGR24, kFrameWidth, kFrameHeight,
+    sws_ctx_ = sws_getContext(vb::kWidth, vb::kHeight, AV_PIX_FMT_BGR24, vb::kWidth, vb::kHeight,
                               AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws_ctx_)
     {
@@ -180,8 +187,8 @@ bool VideoEngine::init_sws()
         return false;
     }
     frame_yuv_->format = AV_PIX_FMT_YUV420P;
-    frame_yuv_->width = kFrameWidth;
-    frame_yuv_->height = kFrameHeight;
+    frame_yuv_->width = vb::kWidth;
+    frame_yuv_->height = vb::kHeight;
     if (av_frame_get_buffer(frame_yuv_, 32) < 0)
     {
         fprintf(stderr, "[engine] av_frame_get_buffer 失败\n");
@@ -247,22 +254,12 @@ bool VideoEngine::init_muxer()
     if (is_network_output_)
     {
         // RTP 流没有文件可供回放，接收端必须靠"说明书"(SDP)才知道：
-        // 编码是什么、RTP payload 号、端口多少。把说明书写到 broadcast.sdp，
-        // 用 VLC/ffplay 打开它就能收流
-        char sdp[4096];
-        if (av_sdp_create(&fmt_ctx_, 1, sdp, sizeof(sdp)) == 0)
-        {
-            const char *sdp_path = "broadcast.sdp";
-            FILE *f = fopen(sdp_path, "w");
-            if (f)
-            {
-                fputs(sdp, f);
-                fclose(f);
-                printf("[engine] 已生成接收端说明书(SDP): %s\n", sdp_path);
-                printf("[engine] 接收端用它收流：vlc %s  或  ffplay %s\n", sdp_path, sdp_path);
-            }
-        }
-        printf("[engine] 推流地址: %s\n", output_.c_str());
+        // 编码是什么、RTP payload 号、端口多少。
+        // 注意：这里先不生成 SDP——首帧编码前 libx264 的 extradata 可能只有
+        // SPS 没有 PPS（实测如此），此时生成的 sprop-parameter-sets 会缺 PPS，
+        // 接收端打不开。改为在 encode_and_write 检测到首个关键帧（extradata
+        // 已完整）后再写 broadcast.sdp。
+        printf("[engine] 推流地址: %s（SDP 将在首个关键帧后生成）\n", output_.c_str());
     }
     else
     {
@@ -279,20 +276,20 @@ void VideoEngine::read_frame(cv::Mat &bgr)
     if (use_test_pattern_)
     {
         // 生成测试画面：渐变底 + 移动白色方块 + 帧号，肉眼可确认画面在动
-        bgr = cv::Mat(kFrameHeight, kFrameWidth, CV_8UC3);
-        for (int y = 0; y < kFrameHeight; y++)
+        bgr = cv::Mat(vb::kHeight, vb::kWidth, CV_8UC3);
+        for (int y = 0; y < vb::kHeight; y++)
         {
             uchar *row = bgr.ptr<uchar>(y); // 逐行填充渐变色
-            for (int x = 0; x < kFrameWidth; x++)
+            for (int x = 0; x < vb::kWidth; x++)
             {
-                row[x * 3 + 0] = (uchar)(x * 255 / kFrameWidth);                        // B 随 x 渐变
-                row[x * 3 + 1] = (uchar)(y * 255 / kFrameHeight);                       // G 随 y 渐变
-                row[x * 3 + 2] = (uchar)((x + y) * 255 / (kFrameWidth + kFrameHeight)); // R
+                row[x * 3 + 0] = (uchar)(x * 255 / vb::kWidth);                        // B 随 x 渐变
+                row[x * 3 + 1] = (uchar)(y * 255 / vb::kHeight);                       // G 随 y 渐变
+                row[x * 3 + 2] = (uchar)((x + y) * 255 / (vb::kWidth + vb::kHeight)); // R
             }
         }
         // 移动的白色方块（横坐标随帧号变化，形成动态画面）
-        int bx = (frame_index_ * 8) % kFrameWidth;
-        cv::rectangle(bgr, cv::Rect(bx, kFrameHeight / 2, 40, 40), cv::Scalar(255, 255, 255), cv::FILLED);
+        int bx = (frame_index_ * 8) % vb::kWidth;
+        cv::rectangle(bgr, cv::Rect(bx, vb::kHeight / 2, 40, 40), cv::Scalar(255, 255, 255), cv::FILLED);
         // 左上角标注帧号
         char text[32];
         snprintf(text, sizeof(text), "frame %d", frame_index_);
@@ -307,9 +304,9 @@ void VideoEngine::read_frame(cv::Mat &bgr)
             return; // 读不到帧（文件播完 / 摄像头故障）
         }
         // 尺寸不一致时统一缩放到 640x480（保证编码尺寸固定）
-        if (bgr.cols != kFrameWidth || bgr.rows != kFrameHeight)
+        if (bgr.cols != vb::kWidth || bgr.rows != vb::kHeight)
         {
-            cv::resize(bgr, bgr, cv::Size(kFrameWidth, kFrameHeight));
+            cv::resize(bgr, bgr, cv::Size(vb::kWidth, vb::kHeight));
         }
     }
 }
@@ -343,6 +340,25 @@ bool VideoEngine::encode_and_write(AVFrame *frame)
         pkt->dts = av_rescale_q_rnd(pkt->dts, enc_ctx_->time_base, out_stream->time_base,
                                     (AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
         pkt->duration = av_rescale_q(pkt->duration, enc_ctx_->time_base, out_stream->time_base);
+        // 网络推流：首个关键帧时 libx264 的 extradata 已含完整 SPS/PPS，
+        // 此刻生成的 SDP 才能带上完整 sprop-parameter-sets。接收端（viewer /
+        // VLC / ffplay）通过 rtp demuxer 读 SDP 拿到参数集解码，流内无需补发
+        if (is_network_output_ && (pkt->flags & AV_PKT_FLAG_KEY) && !sdp_written_)
+        {
+            sdp_written_ = true;
+            char sdp[4096];
+            if (av_sdp_create(&fmt_ctx_, 1, sdp, sizeof(sdp)) == 0)
+            {
+                FILE *f = fopen("broadcast.sdp", "w");
+                if (f)
+                {
+                    fputs(sdp, f);
+                    fclose(f);
+                    printf("[engine] 已生成接收端 SDP: broadcast.sdp（含 sprop-parameter-sets）\n");
+                    printf("[engine] 接收端用它收流：./viewer broadcast.sdp  或  ffplay broadcast.sdp\n");
+                }
+            }
+        }
         if (av_interleaved_write_frame(fmt_ctx_, pkt) < 0)
         {
             fprintf(stderr, "[engine] av_interleaved_write_frame 失败\n");
@@ -360,8 +376,8 @@ bool VideoEngine::encode_and_write(AVFrame *frame)
 // ------------------------------------------------------------------
 void VideoEngine::run()
 {
-    printf("[engine] 开始%s，按 q 退出%s\n", is_network_output_ ? "推流" : "采集编码",
-           duration_sec_ > 0 ? "" : "（或用 -t 指定时长）");
+    printf("[engine] 开始%s（GUI 点停止或 Ctrl+C 可中断）\n",
+           is_network_output_ ? "推流" : "采集编码");
 
     // 推流的"开播时刻"：用于按帧率均匀发送（见循环开头节流）
     const auto send_start = std::chrono::steady_clock::now();
@@ -376,7 +392,7 @@ void VideoEngine::run()
         {
             auto target = send_start +
                           std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                              std::chrono::duration<double>((double)frame_index_ / kFrameRate));
+                              std::chrono::duration<double>((double)frame_index_ / vb::kFrameRate));
             std::this_thread::sleep_until(target);
         }
 
@@ -392,7 +408,7 @@ void VideoEngine::run()
         // 2. BGR -> YUV420P（sws_scale 转换进 frame_yuv_）
         uint8_t *src_data[4] = {bgr.data, nullptr, nullptr, nullptr};
         int src_linesize[4] = {(int)bgr.step, 0, 0, 0};
-        sws_scale(sws_ctx_, src_data, src_linesize, 0, kFrameHeight, frame_yuv_->data, frame_yuv_->linesize);
+        sws_scale(sws_ctx_, src_data, src_linesize, 0, vb::kHeight, frame_yuv_->data, frame_yuv_->linesize);
 
         // 3. 设置时间戳（按 1/30 秒递增），编码并输出（写文件 / 发网络）
         frame_yuv_->pts = frame_index_;
@@ -403,19 +419,19 @@ void VideoEngine::run()
 
         // 4. 进度打印：每 30 帧（1 秒）打印一次
         frame_index_++;
-        if (frame_index_ % kFrameRate == 0)
+        if (frame_index_ % vb::kFrameRate == 0)
         {
             printf("[engine] 已%s %d 帧 (%.1f 秒)\n", is_network_output_ ? "发送" : "编码", frame_index_,
-                   (double)frame_index_ / kFrameRate);
+                   (double)frame_index_ / vb::kFrameRate);
         }
 
-        // 5. 退出条件：按 q / 达到设定时长
-        if (cv::waitKey(1) == 'q')
+        // 5. 退出条件：收到停止请求（GUI 按钮/closeEvent）或达到设定时长
+        if (stop_requested_)
         {
-            printf("[engine] 用户按 q 退出\n");
+            printf("[engine] 收到停止请求，退出\n");
             break;
         }
-        if (duration_sec_ > 0 && frame_index_ >= duration_sec_ * kFrameRate)
+        if (duration_sec_ > 0 && frame_index_ >= duration_sec_ * vb::kFrameRate)
         {
             printf("[engine] 达到设定时长 %d 秒\n", duration_sec_);
             break;
@@ -425,7 +441,7 @@ void VideoEngine::run()
         //    测试图无采集节奏；摄像头自带节奏；网络模式已在循环开头节流
         if (use_test_pattern_ && !is_network_output_)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000 / kFrameRate));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000 / vb::kFrameRate));
         }
     }
 
@@ -489,4 +505,6 @@ void VideoEngine::cleanup()
     {
         cap_.release();
     }
+    // 显式置空底层 V4L2 句柄，避免部分驱动/虚拟摄像头在 release() 后仍短暂占用设备节点
+    cap_ = cv::VideoCapture();
 }
