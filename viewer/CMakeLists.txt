@@ -1,12 +1,21 @@
-# 接收端 viewer：RTP over UDP (端口 5004) -> H.264 解码 -> 显示
-qt_add_executable(viewer
+# 接收端 viewer：读取 SDP → FFmpeg rtp demuxer 收流 → H.264 解码 → Qt 显示
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavcodec
+    libavformat
+    libavutil
+    libswscale
+)
+
+add_executable(viewer
     src/main.cpp
+    src/h264_decoder.cpp
+    src/viewer_window.cpp
+    src/video_receiver.cpp
 )
 
 target_link_libraries(viewer PRIVATE
-    Qt6::Widgets
-    Qt6::Network
-    Qt6::Multimedia
-    Qt6::MultimediaWidgets
+    Qt::Widgets
+    PkgConfig::FFMPEG
     vb_common
 )

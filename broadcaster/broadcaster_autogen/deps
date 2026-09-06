@@ -1,0 +1,4 @@
+broadcaster_autogen/timestamp: \
+	/home/vicky/video_broadcast/broadcaster/CMakeLists.txt \
+	/home/vicky/video_broadcast/broadcaster/src/main.cpp \
+	/usr/bin/cmake
